@@ -21,6 +21,7 @@
     showTopButton: initialShowTopButton = true,
     onProgress,
     externalLinksTarget = '_blank',
+    twoPage: initialTwoPage = false,
   } = props;
 
   pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -32,6 +33,8 @@
   const savePDFFn = (savePDF as unknown) as (args: { fileUrl?: string; data?: string; name?: string }) => Promise<void>;
 
   let canvas: HTMLCanvasElement | null = $state(null);
+  let leftCanvas: HTMLCanvasElement | null = $state(null);
+  let rightCanvas: HTMLCanvasElement | null = $state(null);
   let currentPage = $state(controlledCurrentPage ?? legacyPageNum ?? 1);
   let pageCount = $state(0);
   let pdfDoc: any = null;
@@ -61,6 +64,7 @@
   let downloadFileName = initialDownloadFileName;
   let showTopButton = initialShowTopButton;
   let pageNum = $state(1);
+  let twoPageView = $state(initialTwoPage);
 
   $effect(() => {
 
@@ -86,7 +90,7 @@
       await page.render(renderContext).promise;
 
       // Handle PDF links
-      await handlePageLinks(page, viewport);
+      await handlePageLinks(page, viewport, canvas);
 
       pageRendering = false;
       currentPage = num;
@@ -113,18 +117,18 @@
     }
   };
 
-  const handlePageLinks = async (page: any, viewport: any) => {
+  const handlePageLinks = async (page: any, viewport: any, targetCanvas: HTMLCanvasElement | null) => {
     try {
       const annotations = await page.getAnnotations();
       
       // Remove existing link overlays for this page
-      const parent = (canvas?.parentNode as HTMLElement | null) ?? null;
+      const parent = (targetCanvas?.parentNode as HTMLElement | null) ?? null;
       const existingLinks = parent?.querySelectorAll('.pdf-link-overlay') ?? [];
       existingLinks.forEach((link: Element) => link.remove());
 
       annotations.forEach((annotation: any) => {
         if (annotation.subtype === 'Link' && annotation.url) {
-          createLinkOverlay(annotation, viewport);
+          createLinkOverlay(annotation, viewport, targetCanvas);
         }
       });
     } catch (error) {
@@ -132,7 +136,7 @@
     }
   };
 
-  const createLinkOverlay = (annotation: any, viewport: any) => {
+  const createLinkOverlay = (annotation: any, viewport: any, targetCanvas: HTMLCanvasElement | null) => {
     const linkElement = document.createElement('a');
     linkElement.className = 'pdf-link-overlay';
     linkElement.href = annotation.url;
@@ -157,14 +161,71 @@
     linkElement.style.border = 'none';
     
     // Make the canvas container relative if it isn't already
-    const parent = (canvas?.parentNode as HTMLElement | null) ?? null;
+    const parent = (targetCanvas?.parentNode as HTMLElement | null) ?? null;
     if (parent && !parent.style.position) {
       parent.style.position = 'relative';
     }
     parent?.appendChild(linkElement);
   };
 
+  const clearLinkOverlays = (targetCanvas: HTMLCanvasElement | null) => {
+    const parent = (targetCanvas?.parentNode as HTMLElement | null) ?? null;
+    const existingLinks = parent?.querySelectorAll('.pdf-link-overlay') ?? [];
+    existingLinks.forEach((link: Element) => link.remove());
+  };
+
+  const renderPageToCanvas = async (num: number, targetCanvas: HTMLCanvasElement | null) => {
+    if (!pdfDoc || !targetCanvas) return;
+    if (num < 1 || num > pageCount) return;
+    try {
+      const page = await pdfDoc.getPage(num);
+      const viewport = page.getViewport({ scale, rotation });
+      const ctx = targetCanvas.getContext('2d');
+      if (!ctx) return;
+      targetCanvas.height = viewport.height as number;
+      targetCanvas.width = viewport.width as number;
+      const renderContext = {
+        canvasContext: ctx,
+        viewport,
+      } as any;
+      await page.render(renderContext).promise;
+      await handlePageLinks(page, viewport, targetCanvas);
+    } catch (error) {
+      console.error('Error rendering page to canvas:', error);
+    }
+  };
+
+  const toOdd = (num: number) => (num % 2 === 0 ? num - 1 : num);
+
+  const renderTwoPages = async (startNum: number) => {
+    if (!pdfDoc) return;
+    const leftNum = toOdd(Math.max(1, startNum));
+    await renderPageToCanvas(leftNum, leftCanvas);
+    if (leftNum + 1 <= pageCount) {
+      await renderPageToCanvas(leftNum + 1, rightCanvas);
+    } else if (rightCanvas) {
+      const ctx = rightCanvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, rightCanvas.width, rightCanvas.height);
+      clearLinkOverlays(rightCanvas);
+    }
+    currentPage = leftNum;
+    pageNum = leftNum;
+  };
+
+  const renderCurrentView = (desiredStart?: number) => {
+    const targetStart = desiredStart ?? currentPage;
+    if (twoPageView) {
+      renderTwoPages(targetStart);
+    } else {
+      queueRenderPage(targetStart);
+    }
+  };
+
   const queueRenderPage = (num: number) => {
+    if (twoPageView) {
+      renderTwoPages(num);
+      return;
+    }
     if (pageRendering) {
       pdfDoc.getPage(num).then(() => {
           if (!pageRendering) renderPage(num);
@@ -175,26 +236,38 @@
   };
 
   const onPrevPage = () => {
+    if (twoPageView) {
+      const prevStart = Math.max(1, toOdd(currentPage) - 2);
+      renderTwoPages(prevStart);
+      return;
+    }
     if (currentPage <= 1) return;
-      queueRenderPage(currentPage - 1);
+    queueRenderPage(currentPage - 1);
   };
 
   const onNextPage = () => {
-    if (!pdfDoc || currentPage >= pageCount) return;
-      queueRenderPage(currentPage + 1);
+    if (!pdfDoc) return;
+    if (twoPageView) {
+      const lastPairStart = pageCount % 2 === 0 ? pageCount - 1 : pageCount;
+      const nextStart = Math.min(toOdd(currentPage) + 2, lastPairStart);
+      renderTwoPages(nextStart);
+      return;
+    }
+    if (currentPage >= pageCount) return;
+    queueRenderPage(currentPage + 1);
   };
 
   const onZoomIn = () => {
     if (scale <= maxScale) {
       scale += 0.1;
-      queueRenderPage(pageNum);
+      renderCurrentView(pageNum);
     }
   };
 
   const onZoomOut = () => {
     if (scale >= minScale) {
       scale -= 0.1;
-      queueRenderPage(pageNum);
+      renderCurrentView(pageNum);
     }
   };
 
@@ -204,12 +277,12 @@
 
   const clockwiseRotate = () => {
     rotation += 90;
-    queueRenderPage(pageNum);
+    renderCurrentView(pageNum);
   };
 
   const antiClockwiseRotate = () => {
     rotation -= 90;
-    queueRenderPage(pageNum);
+    renderCurrentView(pageNum);
   };
 
   const onPasswordSubmit = () => {
@@ -241,7 +314,12 @@
       }
 
       isInitialized = true;
-      renderPage(currentPage);
+      if (twoPageView) {
+        currentPage = toOdd(currentPage);
+        await renderTwoPages(currentPage);
+      } else {
+        renderPage(currentPage);
+      }
     } catch (error) {
       passwordError = true;
       passwordMessage = error instanceof Error ? error.message : String(error);
@@ -296,7 +374,12 @@
     const desiredPage = props.currentPage ?? props.pageNum;
     if (!isInitialized || desiredPage == null) return;
     if (desiredPage !== currentPage && desiredPage >= 1 && desiredPage <= pageCount) {
-      queueRenderPage(desiredPage);
+      if (twoPageView) {
+        const desiredPairStart = toOdd(desiredPage);
+        renderTwoPages(desiredPairStart);
+      } else {
+        queueRenderPage(desiredPage);
+      }
     }
   });
 </script>
@@ -568,16 +651,30 @@
             </div>
           </span>
         </div>
-        <div class={showBorder === true ? 'viewer' : 'null'}>
-          <canvas bind:this={canvas} width={pageWidth} height={pageHeight}></canvas>
-        </div>
+        {#if twoPageView}
+          <div class={showBorder === true ? 'viewer two-page' : 'two-page'}>
+            <canvas bind:this={leftCanvas}></canvas>
+            <canvas bind:this={rightCanvas}></canvas>
+          </div>
+        {:else}
+          <div class={showBorder === true ? 'viewer' : 'null'}>
+            <canvas bind:this={canvas} width={pageWidth} height={pageHeight}></canvas>
+          </div>
+        {/if}
       </div>
     {:else}
-      <div class={showBorder === true ? 'viewer' : 'null'}>
-        <canvas bind:this={canvas}></canvas>
-        <!-- width={window.innerWidth} -->
-        <!-- height={window.innerHeight}  -->
-      </div>
+      {#if twoPageView}
+        <div class={showBorder === true ? 'viewer two-page' : 'two-page'}>
+          <canvas bind:this={leftCanvas}></canvas>
+          <canvas bind:this={rightCanvas}></canvas>
+        </div>
+      {:else}
+        <div class={showBorder === true ? 'viewer' : 'null'}>
+          <canvas bind:this={canvas}></canvas>
+          <!-- width={window.innerWidth} -->
+          <!-- height={window.innerHeight}  -->
+        </div>
+      {/if}
     {/if}
   </div>
   {#if showTopButton}
@@ -693,6 +790,14 @@
     border-width: 1px;
     border-color: #000;
     border-style: solid;
+  }
+
+  .two-page {
+    display: flex;
+    flex-direction: row;
+    gap: 1rem;
+    align-items: flex-start;
+    justify-content: center;
   }
 
   .icon {
