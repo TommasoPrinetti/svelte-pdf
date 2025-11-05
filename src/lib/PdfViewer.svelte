@@ -237,7 +237,7 @@
 
   const onPrevPage = () => {
     if (twoPageView) {
-      const prevStart = Math.max(1, toOdd(currentPage) - 2);
+      const prevStart = Math.max(1, toOdd(pageNum) - 2);
       renderTwoPages(prevStart);
       return;
     }
@@ -249,7 +249,7 @@
     if (!pdfDoc) return;
     if (twoPageView) {
       const lastPairStart = pageCount % 2 === 0 ? pageCount - 1 : pageCount;
-      const nextStart = Math.min(toOdd(currentPage) + 2, lastPairStart);
+      const nextStart = Math.min(toOdd(pageNum) + 2, lastPairStart);
       renderTwoPages(nextStart);
       return;
     }
